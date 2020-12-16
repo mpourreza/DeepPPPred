@@ -23,15 +23,14 @@ import os
 import nltk
 import spacy
 import networkx as nx
+from sklearn.linear_model import LogisticRegression
 nlp = spacy.load("en_core_web_sm")
 
-data_path = 'data' ## Set the data path here
-
-train_df = pd.read_csv(os.path.join(data_path, 'train.csv'))
-validation_df = pd.read_csv(os.path.join(data_path, 'validation.csv'))
-test_df = pd.read_csv(os.path.join(data_path, 'test.csv'))
-
-pretrained_w2v = gensim.models.Word2Vec.load(os.path.join(data_path, 'word2vec_100_10_5.model'))
+seed = 0
+torch.manual_seed(0)
+np.random.seed(1)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 MAX_LEN = 80
 SHORT_MAX_LEN = 25
@@ -54,40 +53,10 @@ class DynamicDataset(Dataset):
     def __len__(self):
         return len(self.sequences)
 
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-seed = 0
-
-torch.manual_seed(0)
-np.random.seed(1)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
-
-with open(os.path.join(data_path, 'sequences_labels.pkl'), 'rb') as handle:
-    [train_sequences, train_features, train_sp_sequences, train_labels, val_sequences, val_features, val_sp_sequences, val_labels, 
-    test_sequences, test_features, test_sp_sequences, test_labels, propheno_sequences, propheno_features, propheno_labels] = pickle.load(handle)
-
-with open(os.path.join(data_path, 'tokenizer.pkl'), 'rb') as handle:
-    tokenizer = pickle.load(handle)
-
-vocab_size = len(tokenizer.word_index)
-
-weights_matrix = np.zeros((vocab_size+1, EMBEDDING_SIZE))
-for i, word in enumerate(tokenizer.word_index, start=1):
-    try: 
-        weights_matrix[i] = pretrained_w2v.wv[word]
-    except KeyError:
-        weights_matrix[i] = np.random.normal(scale=0.6, size=(EMBEDDING_SIZE, ))
-
-train = DynamicDataset(train_sequences, train_features, train_sp_sequences, train_labels)
-validation = DynamicDataset(val_sequences, val_features, val_sp_sequences, val_labels)
-test = DynamicDataset(test_sequences, test_features, test_sp_sequences, test_labels)
-
-
-seed = 0
-
 class MultiCnn(nn.Module):
+    """
+    Defines the CNN model introduced in the paper
+    """
     def __init__(self, vocab_size, embedding_size):
         torch.manual_seed(seed)
         super(MultiCnn, self).__init__()
@@ -159,6 +128,9 @@ class MultiCnn(nn.Module):
         return fc3
 
 class BiLSTMShort(nn.Module):
+    """
+    Defines the RNN model introduced in the paper
+    """
     def __init__(self, vocab_size, embedding_size):
         torch.manual_seed(seed)
         super(BiLSTMShort, self).__init__()
@@ -189,11 +161,19 @@ class BiLSTMShort(nn.Module):
 
 
 def print_performance(preds, true_labels):
+    """
+    Print the performance based on the input predictions and true labels
+    """
     print('Precision: {0:4.3f}, Recall: {1:4.3f}, F1: {2:4.3f}, AUROC: {3:4.3f}'.format(precision_score(true_labels, preds), recall_score(true_labels, preds), f1_score(true_labels, preds), roc_auc_score(true_labels, preds)))
     print('tn={0:d}, fp={1:d}, fn={2:d}, tp={3:d}'.format(*confusion_matrix(true_labels, preds).ravel()))
     print('{0:4.3f} {1:4.3f} {2:4.3f} {3:4.3f}'.format(precision_score(true_labels, preds), recall_score(true_labels, preds), f1_score(true_labels, preds), roc_auc_score(true_labels, preds)))
     
 def train_model(model, dataset, epochs=20, echo=False):
+    """
+    Trains an input model with an input dataset. 
+    epochs is the number of epochs the networks is trained. 
+    echo is used to print the loss at the end of each epoch.
+    """
     criterion = nn.BCELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     loader = DataLoader(dataset, batch_size=32)
@@ -220,6 +200,10 @@ def concatenate_sequences(sequences, features, shorts, labels, added_sequences, 
     return sequences, features, shorts, labels
 
 def eval_model(model, dataset, indices=None, return_binary=False, threshold=None):
+    """
+    Evaluates an input model using an input dataset.
+    return_binary is set to True if only binary predictions are required. If False, probabilities are returned.
+    """
     if indices is not None:
         dataset = DynamicDataset(dataset[indices][0], dataset[indices][1], dataset[indices][2], dataset[indices][3])
     
@@ -256,79 +240,88 @@ def print_stats(dataset):
 
 """# Experiments"""
 
-seed = 0
-
-torch.manual_seed(seed)
-np.random.seed(1)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
-
-train = DynamicDataset(train_sequences, train_features, train_sp_sequences, train_labels)
-
 def run_model(network):
+    """
+    Runs a model with pre-defined values.
+    """
     model = network(vocab_size+1, EMBEDDING_SIZE)
     model.cuda()
     EPOCHS = 20
     train_model(model, train, epochs=EPOCHS, echo=False)
     return model
 
-time1 = time.time()
-rnn_model = run_model(BiLSTMShort)
-time2 = time.time()
-print(time2 - time1)
-time1 = time.time()
-cnn_model = run_model(MultiCnn)
-time2 = time.time()
-print(time2 - time1)
+if __name__ == '__main__':
+    ## Data path required. Set to data if all the data is located in the `data` folder
+    data_path = 'data' ## Set the data path here
 
-rnn_predictions, true_labels = eval_model(rnn_model, test, return_binary=True)
-print_performance(rnn_predictions, true_labels)
+    ## Load train, validation, and test sets
+    train_df = pd.read_csv(os.path.join(data_path, 'train.csv'))
+    validation_df = pd.read_csv(os.path.join(data_path, 'validation.csv'))
+    test_df = pd.read_csv(os.path.join(data_path, 'test.csv'))
 
-cnn_predictions, true_labels = eval_model(cnn_model, test, return_binary=True)
-print_performance(cnn_predictions, true_labels)
+    ## Load pretrained word2vec word embeddings
+    pretrained_w2v = gensim.models.Word2Vec.load(os.path.join(data_path, 'word2vec_100_10_5.model'))
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-with open(os.path.join(data_path, 'pppred_bert_probabilities_validation_test.pkl'), 'rb') as handle:
-    [flat_predictions_val, flat_predictions_test] = pickle.load(handle)
+    with open(os.path.join(data_path, 'sequences_labels.pkl'), 'rb') as handle:
+        [train_sequences, train_features, train_sp_sequences, train_labels, val_sequences, val_features, val_sp_sequences, val_labels, 
+        test_sequences, test_features, test_sp_sequences, test_labels, propheno_sequences, propheno_features, propheno_labels] = pickle.load(handle)
 
-from sklearn.linear_model import LogisticRegression
+    with open(os.path.join(data_path, 'tokenizer.pkl'), 'rb') as handle:
+        tokenizer = pickle.load(handle)
 
-rnn_val_predictions, true_labels = eval_model(rnn_model, validation, return_binary=False)
-rnn_val_predictions = np.array(rnn_val_predictions)
-cnn_val_predictions, true_labels = eval_model(cnn_model, validation, return_binary=False)
-cnn_val_predictions = np.array(cnn_val_predictions)
-probabilities = clf.predict_proba(vec.transform(validation_df['Sentence']))
-lr = LogisticRegression()
-lr.fit(np.concatenate((rnn_val_predictions, cnn_val_predictions, probabilities[:,1].reshape(-1,1), flat_predictions_val.reshape(-1,1)), axis=1), val_labels)
+    vocab_size = len(tokenizer.word_index)
 
-rnn_test_predictions, true_labels = eval_model(rnn_model, test, return_binary=False)
-rnn_test_predictions = np.array(rnn_test_predictions)
-cnn_test_predictions, true_labels = eval_model(cnn_model, test, return_binary=False)
-cnn_test_predictions = np.array(cnn_test_predictions)
-probabilities_test = clf.predict_proba(vec.transform(test_df['Sentence']))
-lr_preds = lr.predict(np.concatenate((rnn_test_predictions, cnn_test_predictions, probabilities_test[:,1].reshape(-1,1), flat_predictions_test.reshape(-1,1)), axis=1))
-lr_preds = np.array(lr_preds)
-true_labels = np.array(true_labels)
-print_performance(lr_preds, true_labels)
+    weights_matrix = np.zeros((vocab_size+1, EMBEDDING_SIZE))
+    for i, word in enumerate(tokenizer.word_index, start=1):
+        try: 
+            weights_matrix[i] = pretrained_w2v.wv[word]
+        except KeyError:
+            weights_matrix[i] = np.random.normal(scale=0.6, size=(EMBEDDING_SIZE, ))
 
-abs_idx = np.where(test_df['type'] == 'abs')
-ft_idx = np.where(test_df['type'] == 'ft')
+    train = DynamicDataset(train_sequences, train_features, train_sp_sequences, train_labels)
+    validation = DynamicDataset(val_sequences, val_features, val_sp_sequences, val_labels)
+    test = DynamicDataset(test_sequences, test_features, test_sp_sequences, test_labels)
+    
+    
+    train = DynamicDataset(train_sequences, train_features, train_sp_sequences, train_labels)
 
-print_performance(preds, true_labels)
-print_performance(preds[abs_idx], true_labels[abs_idx])
-print_performance(preds[ft_idx], true_labels[ft_idx])
-print('*' * 50)
-print_performance((flat_predictions_test > 0), test_labels)
-print_performance((flat_predictions_test > 0)[abs_idx], test_labels[abs_idx])
-print_performance((flat_predictions_test > 0)[ft_idx], test_labels[ft_idx])
-print('*' * 50)
-print_performance(lr_preds, true_labels)
-print_performance(lr_preds[abs_idx], true_labels[abs_idx])
-print_performance(lr_preds[ft_idx], true_labels[ft_idx])
-print('*' * 50)
-print_performance(rnn_predictions, true_labels)
-print_performance(rnn_predictions[abs_idx], true_labels[abs_idx])
-print_performance(rnn_predictions[ft_idx], true_labels[ft_idx])
-print('*' * 50)
-print_performance(cnn_predictions, true_labels)
-print_performance(cnn_predictions[abs_idx], true_labels[abs_idx])
-print_performance(cnn_predictions[ft_idx], true_labels[ft_idx])
+    time1 = time.time()
+    rnn_model = run_model(BiLSTMShort)
+    time2 = time.time()
+    print(time2 - time1)
+    time1 = time.time()
+    cnn_model = run_model(MultiCnn)
+    time2 = time.time()
+    print(time2 - time1)
+
+    rnn_predictions, true_labels = eval_model(rnn_model, test, return_binary=True)
+    print('RNN performance:')
+    print_performance(rnn_predictions, true_labels)
+
+    cnn_predictions, true_labels = eval_model(cnn_model, test, return_binary=True)
+    print('CNN performance:')
+    print_performance(cnn_predictions, true_labels)
+
+    with open(os.path.join(data_path, 'pppred_bert_probabilities_validation_test.pkl'), 'rb') as handle:
+        [flat_predictions_val, flat_predictions_test] = pickle.load(handle)
+
+    rnn_val_predictions, true_labels = eval_model(rnn_model, validation, return_binary=False)
+    rnn_val_predictions = np.array(rnn_val_predictions)
+    cnn_val_predictions, true_labels = eval_model(cnn_model, validation, return_binary=False)
+    cnn_val_predictions = np.array(cnn_val_predictions)
+    probabilities = clf.predict_proba(vec.transform(validation_df['Sentence']))
+    lr = LogisticRegression()
+    lr.fit(np.concatenate((rnn_val_predictions, cnn_val_predictions, probabilities[:,1].reshape(-1,1), flat_predictions_val.reshape(-1,1)), axis=1), val_labels)
+
+    rnn_test_predictions, true_labels = eval_model(rnn_model, test, return_binary=False)
+    rnn_test_predictions = np.array(rnn_test_predictions)
+    cnn_test_predictions, true_labels = eval_model(cnn_model, test, return_binary=False)
+    cnn_test_predictions = np.array(cnn_test_predictions)
+    probabilities_test = clf.predict_proba(vec.transform(test_df['Sentence']))
+    lr_preds = lr.predict(np.concatenate((rnn_test_predictions, cnn_test_predictions, probabilities_test[:,1].reshape(-1,1), flat_predictions_test.reshape(-1,1)), axis=1))
+    lr_preds = np.array(lr_preds)
+    true_labels = np.array(true_labels)
+    print('Ensemble performance:')
+    print_performance(lr_preds, true_labels)
